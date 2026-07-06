@@ -20,7 +20,7 @@ This is a known limitation. The niri maintainer's position is that this belongs 
 
 ## Why this approach
 
-niri already re-applies its *dynamic* rule properties (opacity, corner radius, borders, min and max size) whenever a window's title or app-id changes, so those never needed help. The only properties that suffer the late-title race are the one-shot `open-*` and `default-*` family.
+niri already re-applies its *dynamic* rule properties whenever a window's title or app-id changes. That includes opacity, corner radius, borders, block-out, and the min and max size constraints. All of those keep working on their own, even for windows that name themselves late, so this tool does not need to touch them and does not. The only properties that suffer the late-title race are the one-shot `open-*` and `default-*` family, and those are all this daemon handles.
 
 So this daemon does exactly one thing: it listens to `niri msg event-stream`, and when a window *changes* into a state that matches one of your tagged rules, it runs the equivalent `niri msg action` command targeted at that window by id. Each window is acted on once. If you later move it yourself, it stays where you put it.
 
@@ -56,7 +56,7 @@ Only the one-shot family is translated. Everything else is left to niri, which a
 
 `openMaximized` is skipped with a warning, because niri's `maximize-column` acts only on the focused window and cannot be applied by id without stealing focus. Use `openFullscreen` if you want that enforced.
 
-Dynamic properties (opacity, corner radius, borders, min and max size, block-out) are intentionally ignored here so the daemon does not fight the compositor.
+Dynamic properties (opacity, corner radius, borders, min and max size, block-out) already work on their own, including on late-titled windows, because niri re-applies them whenever a window's title or app-id changes. This daemon deliberately leaves them to niri so it does not fight the compositor. If you rely on min or max size rules, they will keep working; you do not need this tool for them.
 
 ## Install
 
