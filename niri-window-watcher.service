@@ -1,0 +1,18 @@
+[Unit]
+Description=niri window watcher (apply rules to windows that set title/app-id late)
+Documentation=https://github.com/niri-wm/niri/discussions/1599
+# Tie lifetime to the graphical session so it starts on login and stops on logout.
+PartOf=graphical-session.target
+After=graphical-session.target
+# Keep restart storms from tripping systemd's start-limit and giving up.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=%h/.config/niri/scripts/niri-window-watcher.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical-session.target

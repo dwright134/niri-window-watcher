@@ -1,0 +1,10 @@
+{
+  "_help": "Settings for niri-window-watcher.py. Rules themselves live in your DMS window rules (create them in the DMS Settings > Window Rules GUI). Any DMS rule whose NAME contains the marker below gets enforced dynamically over IPC after the window's title/app-id lands late (which is when niri's own open-* rules miss). Non-open-* actions (opacity, corner radius, borders, min/max size) are left to niri, which already re-applies them on title change.",
+  "marker": "[live]",
+  "compositor": "niri",
+  "log_matches": true,
+  "dms_watch_file": "~/.config/niri/dms/windowrules.kdl",
+
+  "_extra_rules_help": "Optional escape hatch for windows you can't express in DMS. Same idea, applied in addition to the marked DMS rules. match: app_id/title are Python regex (re.search). actions: [{action, args}] mapped to `niri msg action <action> ...`.",
+  "extra_rules": []
+}
