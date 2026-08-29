@@ -13,7 +13,16 @@ Any rule whose *name* contains the marker (default "[live]", see
 watcher-settings.json) is enforced dynamically. niri's dynamic properties
 (opacity, corner radius, borders, min/max size) are left to niri, which
 already re-applies those on title change — only the one-shot open-* / default-*
-family needs this daemon.
+family needs this daemon. openFullscreen/openMaximized are NOT enforced: niri
+only exposes toggles for those and doesn't report the current state, so
+re-applying them would flip already-correct windows.
+
+Rules only fire for windows first seen within `match_window_seconds` (default
+5, see watcher-settings.json). Late-titling windows (PiP, extension popouts)
+settle within a second of mapping; a long-lived window whose title later
+changes to match (e.g. the main browser window opening an extension *tab*,
+which carries the same "Extension: ..." title as a popout) is left alone.
+Windows already open when the daemon (re)connects are never touched.
 
 Stdlib only. Talks to niri via `niri msg` and to DMS via `dms config`.
 
@@ -90,16 +99,16 @@ def translate_actions(actions: dict, rule_name: str) -> list[list[str]]:
     if h:
         out.append(["set-window-height", h, "--id"])
 
-    if actions.get("openFullscreen"):
-        out.append(["fullscreen-window", "--id"])
-
     if actions.get("openFocused"):
         out.append(["focus-window", "--id"])
 
-    if actions.get("openMaximized"):
-        err(f"rule {rule_name!r}: openMaximized can't be re-applied over IPC without "
-            f"stealing focus (maximize-column is focused-only) — skipping that action. "
-            f"Use openFullscreen instead if you want it enforced.")
+    for key, action in (("openFullscreen", "fullscreen-window"),
+                        ("openMaximized", "maximize-column")):
+        if actions.get(key):
+            err(f"rule {rule_name!r}: {key} can't be enforced over IPC — niri's "
+                f"`{action}` is a toggle and window state isn't reported, so "
+                f"re-applying it would un-{key[4:].lower()} windows niri already "
+                f"handled at map time. Skipping that action.")
 
     return out
 
@@ -110,6 +119,13 @@ class Rule:
         self.app_re = re.compile(app_id) if app_id else None
         self.title_re = re.compile(title) if title else None
         self.action_templates = action_templates  # list[list[str]]
+        # Desired floating state if the rule sets one (None = don't care).
+        self.wants_floating = None
+        for t in action_templates:
+            if t[0] == "move-window-to-floating":
+                self.wants_floating = True
+            elif t[0] == "move-window-to-tiling":
+                self.wants_floating = False
 
     def matches(self, app_id: str, title: str) -> bool:
         if self.app_re is None and self.title_re is None:
@@ -140,7 +156,9 @@ class Config:
         self.compositor = "niri"
         self.log_matches = True
         self.dms_watch_file = "~/.config/niri/dms/windowrules.kdl"
+        self.match_window_seconds = 5.0
         self.rules: list[Rule] = []
+        self._dms_retry_at = 0.0     # >0: last DMS listing failed, retry then
         self.reload(force=True)
 
     # -- settings.json -----------------------------------------------------
@@ -153,7 +171,8 @@ class Config:
             return None
 
     # -- DMS rules ---------------------------------------------------------
-    def _load_dms_rules(self) -> list[Rule]:
+    def _load_dms_rules(self) -> list[Rule] | None:
+        """Marked DMS rules, or None if DMS couldn't be queried (caller keeps the old set)."""
         try:
             res = subprocess.run(
                 ["dms", "config", "windowrules", "list", self.compositor],
@@ -161,20 +180,20 @@ class Config:
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             err(f"dms: cannot list window rules: {e}")
-            return []
+            return None
         if res.returncode != 0:
             err(f"dms: list failed: {res.stderr.strip()}")
-            return []
+            return None
         raw = res.stdout
         brace = raw.find("{")               # tolerate any banner/prefix
         if brace < 0:
             err("dms: no JSON in output")
-            return []
+            return None
         try:
             data = json.loads(raw[brace:])
         except json.JSONDecodeError as e:
             err(f"dms: bad JSON: {e}")
-            return []
+            return None
 
         rules: list[Rule] = []
         for r in data.get("rules", []):
@@ -238,7 +257,9 @@ class Config:
         except OSError:
             d_mtime = self.dms_mtime
 
-        if not force and s_mtime == self.settings_mtime and d_mtime == self.dms_mtime:
+        retry_due = self._dms_retry_at and time.time() >= self._dms_retry_at
+        if not force and not retry_due \
+                and s_mtime == self.settings_mtime and d_mtime == self.dms_mtime:
             return False
 
         settings = self._load_settings()
@@ -250,11 +271,26 @@ class Config:
         self.compositor = settings.get("compositor", self.compositor)
         self.log_matches = settings.get("log_matches", self.log_matches)
         self.dms_watch_file = settings.get("dms_watch_file", self.dms_watch_file)
+        self.match_window_seconds = float(settings.get("match_window_seconds",
+                                                       self.match_window_seconds))
 
-        self.rules = self._load_dms_rules() + self._load_extra_rules(settings)
+        dms_rules = self._load_dms_rules()
         self.settings_mtime = s_mtime
         self.dms_mtime = os.path.getmtime(expand(self.dms_watch_file)) \
             if os.path.exists(expand(self.dms_watch_file)) else d_mtime
+        if dms_rules is None:
+            # DMS/niri mid-rewrite or a transient parse error: keep what we had
+            # (a fresh start has nothing, so the extra_rules still load) and
+            # retry shortly instead of silently running with zero rules.
+            self._dms_retry_at = time.time() + 10
+            if self.rules:
+                err(f"config: keeping previous {len(self.rules)} rule(s); retrying DMS in 10s")
+                return False
+            self.rules = self._load_extra_rules(settings)
+            err("config: no DMS rules available yet; retrying in 10s")
+            return True
+        self._dms_retry_at = 0.0
+        self.rules = dms_rules + self._load_extra_rules(settings)
         log(f"config: {len(self.rules)} active rule(s) (marker {self.marker!r})")
         for r in self.rules:
             log(f"  - {r.name!r}  app_id={r.app_re.pattern if r.app_re else None!r} "
@@ -273,33 +309,55 @@ def apply_rule(rule: Rule, wid: int) -> None:
             err(f"  action failed: {' '.join(cmd)} -> {res.stderr.strip()}")
 
 
-def handle_window(w: dict, cfg: Config, handled: set, discover: bool) -> None:
+def handle_window(w: dict, cfg: Config, handled: set, first_seen: dict,
+                  discover: bool) -> None:
+    """React to one WindowOpenedOrChanged event.
+
+    handled:    window ids already acted on (or deliberately left alone)
+    first_seen: window id -> monotonic time of the first event we saw for it
+    """
     wid = w.get("id")
     if wid is None:
         return
     app_id = w.get("app_id") or ""
     title = w.get("title") or ""
+    now = time.monotonic()
+    first_seen.setdefault(wid, now)
 
     if discover:
         log(f"window id={wid:<4} floating={int(bool(w.get('is_floating')))} "
-            f"app_id={app_id!r} title={title!r}")
+            f"age={now - first_seen[wid]:.1f}s app_id={app_id!r} title={title!r}")
         return
 
     if wid in handled:
         return
     for rule in cfg.rules:
-        if rule.matches(app_id, title):
+        if not rule.matches(app_id, title):
+            continue
+        age = now - first_seen[wid]
+        if age > cfg.match_window_seconds:
+            # Long-lived window that only now matches (e.g. main browser window
+            # showing an extension tab). Not a late-titling popup: leave it.
             if cfg.log_matches:
-                log(f"match id={wid} rule={rule.name!r} app_id={app_id!r} title={title!r}")
-            apply_rule(rule, wid)
+                log(f"skip  id={wid} rule={rule.name!r} title={title!r}: "
+                    f"window is {age:.0f}s old (> match_window_seconds)")
             handled.add(wid)
             break
+        if rule.wants_floating is not None and bool(w.get("is_floating")) == rule.wants_floating:
+            # niri already got it right at map time; nothing to enforce.
+            handled.add(wid)
+            break
+        if cfg.log_matches:
+            log(f"match id={wid} rule={rule.name!r} app_id={app_id!r} title={title!r}")
+        apply_rule(rule, wid)
+        handled.add(wid)
+        break
 
 
 # --------------------------------------------------------------------------- #
 # Event loop
 # --------------------------------------------------------------------------- #
-def stream_once(cfg: Config, handled: set, discover: bool) -> None:
+def stream_once(cfg: Config, handled: set, first_seen: dict, discover: bool) -> None:
     proc = subprocess.Popen(
         ["niri", "msg", "--json", "event-stream"],
         stdout=subprocess.PIPE, text=True, bufsize=1,
@@ -318,14 +376,29 @@ def stream_once(cfg: Config, handled: set, discover: bool) -> None:
                 continue
 
             if "WindowOpenedOrChanged" in ev:
-                handle_window(ev["WindowOpenedOrChanged"]["window"], cfg, handled, discover)
+                handle_window(ev["WindowOpenedOrChanged"]["window"], cfg, handled,
+                              first_seen, discover)
             elif "WindowsChanged" in ev:
+                # Initial snapshot on (re)connect. These windows were mapped
+                # before we were listening, so niri's own rules have had their
+                # chance and the user may have rearranged them since: treat
+                # them all as handled rather than re-applying anything.
                 windows = ev["WindowsChanged"]["windows"]
-                handled.intersection_update({w.get("id") for w in windows})
+                ids = {w.get("id") for w in windows}
+                handled.intersection_update(ids)
+                for k in list(first_seen):
+                    if k not in ids:
+                        del first_seen[k]
                 for w in windows:
-                    handle_window(w, cfg, handled, discover)
+                    if discover:
+                        handle_window(w, cfg, handled, first_seen, discover)
+                    else:
+                        handled.add(w.get("id"))
+                        first_seen.setdefault(w.get("id"), 0.0)
             elif "WindowClosed" in ev:
-                handled.discard(ev["WindowClosed"].get("id"))
+                wid = ev["WindowClosed"].get("id")
+                handled.discard(wid)
+                first_seen.pop(wid, None)
     finally:
         proc.terminate()
         try:
@@ -349,20 +422,21 @@ def main() -> int:
         return 0
 
     handled: set = set()
+    first_seen: dict = {}
     if args.discover:
         log("discover mode: trigger the windows you want to match "
             "(PiP, Bitwarden, dialogs) and note their app_id/title. Ctrl-C to stop.")
 
     while True:
         try:
-            stream_once(cfg, handled, args.discover)
+            stream_once(cfg, handled, first_seen, args.discover)
         except FileNotFoundError:
             err("niri not found on PATH; retrying in 2s")
         except Exception as e:  # noqa: BLE001 - never die on a stray event
             err(f"stream error: {e!r}; reconnecting in 2s")
         else:
             err("event stream closed; reconnecting in 2s")
-        handled.clear()
+        # Keep `handled`: the reconnect snapshot re-seeds it from live windows.
         time.sleep(2)
 
 

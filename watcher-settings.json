@@ -4,7 +4,8 @@
   "compositor": "niri",
   "log_matches": true,
   "dms_watch_file": "~/.config/niri/dms/windowrules.kdl",
-
+  "_match_window_help": "Only act on a window if its first event was seen at most this many seconds ago. Late-titling popups (PiP, extension popouts) settle within ~1s; a long-lived window whose title later matches (main browser window on an extension tab) is skipped.",
+  "match_window_seconds": 5,
   "_extra_rules_help": "Optional escape hatch for windows you can't express in DMS. Same idea, applied in addition to the marked DMS rules. match: app_id/title are Python regex (re.search). actions: [{action, args}] mapped to `niri msg action <action> ...`.",
   "extra_rules": []
 }

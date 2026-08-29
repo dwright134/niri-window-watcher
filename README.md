@@ -51,10 +51,18 @@ Only the one-shot family is translated. Everything else is left to niri, which a
 | `defaultColumnWidth` | `set-window-width --id`               |
 | `defaultWindowHeight`| `set-window-height --id`              |
 | `openOnWorkspace`    | `move-window-to-workspace --window-id`|
-| `openFullscreen`     | `fullscreen-window --id`              |
 | `openFocused`        | `focus-window --id`                   |
 
-`openMaximized` is skipped with a warning, because niri's `maximize-column` acts only on the focused window and cannot be applied by id without stealing focus. Use `openFullscreen` if you want that enforced.
+`openFullscreen` and `openMaximized` are skipped with a warning: niri only exposes them as toggles (`fullscreen-window`, `maximize-column`) and does not report a window's current state, so re-applying them would un-fullscreen or un-maximize windows niri already handled at map time.
+
+### When a rule fires
+
+A rule fires at most once per window, and only for windows that are *new*:
+
+- Only windows first seen within `match_window_seconds` (default 5) are considered. Late-titling windows (PiP, extension popouts, password-manager dialogs) settle within about a second of mapping. A long-lived window whose title later happens to match (for example the main browser window navigating to an extension tab, which carries the same `Extension: ...` title as a popout) is skipped and logged.
+- A window already in the rule's floating state is left alone.
+- Windows that were already open when the daemon started or reconnected are never touched, so a hiccup in the event stream cannot re-float or resize windows you have since rearranged.
+- If `dms config windowrules list` fails (for instance a transient parse error while DMS rewrites the file), the previous rule set stays active and DMS is retried after 10 seconds, rather than running with no rules.
 
 Dynamic properties (opacity, corner radius, borders, min and max size, block-out) already work on their own, including on late-titled windows, because niri re-applies them whenever a window's title or app-id changes. This daemon deliberately leaves them to niri so it does not fight the compositor. If you rely on min or max size rules, they will keep working; you do not need this tool for them.
 
@@ -135,6 +143,7 @@ You will see a `match` line each time a rule fires, and a failure line if an act
   "compositor": "niri",
   "log_matches": true,
   "dms_watch_file": "~/.config/niri/dms/windowrules.kdl",
+  "match_window_seconds": 5,
   "extra_rules": []
 }
 ```
@@ -143,6 +152,7 @@ You will see a `match` line each time a rule fires, and a failure line if an act
 - `compositor`: passed to `dms config windowrules list`.
 - `log_matches`: log a line whenever a rule fires.
 - `dms_watch_file`: the file whose modification time triggers a rules reload.
+- `match_window_seconds`: only act on a window whose first event was seen at most this many seconds ago. Raise it if an app takes unusually long to set its final title; lower it if a long-lived window is being matched.
 - `extra_rules`: an escape hatch for windows you cannot express in DMS, or if you do not use DMS at all. Each entry is a match plus a list of actions:
 
 ```json
